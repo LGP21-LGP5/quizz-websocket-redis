@@ -1,3 +1,16 @@
+# Requirements
+
+* Golang-go
+
+You might need to install the following packages: 
+```bash
+go get -u -v github.com/garyburd/redigo/redis
+go get -u -v github.com/gorilla/websocket
+go get gopkg.in/yaml.v2
+```
+
+
+
 # websocket-redis
 
 Requires a running Redis instance.
