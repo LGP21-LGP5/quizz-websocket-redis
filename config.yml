@@ -1,6 +1,0 @@
-redis:
-    port: ":6379"
-    pass: "root"
-
-server:
-    port: ":8080"
