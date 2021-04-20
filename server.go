@@ -4,16 +4,49 @@ import (
     "log"
     "net/http"
     "sync"
+    "os"
+    "fmt"
+    "gopkg.in/yaml.v2"
 
     "github.com/garyburd/redigo/redis"
     "github.com/gorilla/websocket"
 )
 
+type Config struct {
+    Redis struct {
+        Port string `yaml:"port"`
+        Pass string `yaml:"pass"`
+    } `yaml:"redis"`
+    Server struct {
+        Port string `yaml:"port"`
+    } `yaml:"server"`
+}
+
+func processError(err error) {
+    fmt.Println(err)
+    os.Exit(2)
+}
+
+func readFile(cfg *Config) {
+    f, err := os.Open("config.yml")
+    if err != nil {
+        processError(err)
+    }
+    defer f.Close()
+
+    decoder := yaml.NewDecoder(f)
+    err = decoder.Decode(cfg)
+    if err != nil {
+        processError(err)
+    }
+} 
+
+
 var (
     cache  *Cache
     pubSub *redis.PubSubConn
-    redisConn  = func() (redis.Conn, error) {
-        return redis.Dial("tcp", ":6379")
+    redisConn  = func(cfg * Config) (redis.Conn, error) {
+        return redis.Dial("tcp", cfg.Redis.Port, redis.DialPassword(cfg.Redis.Pass))
     }
 )
 
@@ -54,10 +87,12 @@ func (c *Cache) newUser(conn *websocket.Conn, id string) *User {
     return u
 }
 
-var serverAddress = ":8080"
+var cfg Config
 
 func main() {
-    redisConn, err := redisConn()
+    readFile(&cfg)
+
+    redisConn, err := redisConn(&cfg)
     if err != nil {
         panic(err)
     }
@@ -70,8 +105,8 @@ func main() {
 
     http.HandleFunc("/ws", wsHandler)
 
-    log.Printf("server started at %s\n", serverAddress)
-    log.Fatal(http.ListenAndServe(serverAddress, nil))
+    log.Printf("server started at %s\n", cfg.Server.Port)
+    log.Fatal(http.ListenAndServe(cfg.Server.Port, nil))
 }
 
 var upgrader = websocket.Upgrader{
@@ -96,10 +131,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
             log.Printf("error on ws. message %s\n", err)
         }
 
-        if c, err := redisConn(); err != nil {
+        if c, err := redisConn(&cfg); err != nil {
             log.Printf("error on redis conn. %s\n", err)
         } else {
             c.Do("PUBLISH", m.DeliveryID, string(m.Content))
+            log.Printf("publised %s into %s\n", m.Content, m.DeliveryID)
         }
     }
 }
