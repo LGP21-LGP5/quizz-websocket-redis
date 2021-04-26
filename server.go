@@ -166,7 +166,7 @@ func (c *Cache) findAndDeliver(userID string, content string) {
             } else {
                 log.Printf("user %s found at our store, message sent\n", userID)
             }
-            return
+            //return
         }
     }
 
