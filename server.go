@@ -52,7 +52,7 @@ var (
 
 func init() {
 	cache = &Cache{
-		Users: make([]*User, 0, 1),
+		channels: make(map[string][]*User),
 	}
 }
 
@@ -62,8 +62,9 @@ type User struct {
 }
 
 type Cache struct {
-	Users []*User
-	mu    sync.Mutex
+	connections int
+	channels    map[string][]*User
+	mu          sync.Mutex
 }
 
 type Message struct {
@@ -81,19 +82,23 @@ func (c *Cache) newUser(conn *websocket.Conn, id string) *User {
 		panic(err)
 	}
 	c.mu.Lock()
+	//c.Users = append(c.Users, u)
+	c.channels[u.ID] = append(c.channels[u.ID], u)
+	c.connections++
 	defer c.mu.Unlock()
-
-	c.Users = append(c.Users, u)
 	return u
 }
 
-func (c *Cache) removeUserByIndex(index int) {
+func (c *Cache) removeUserByIndex(channelId string, index int) {
 	if index == -1 {
 		return
 	}
 	c.mu.Lock()
-	u := c.Users[index]
-	c.Users = append(c.Users[:index], c.Users[:index+1]...)
+	//c.Users = append(c.Users[:index], c.Users[:index+1]...)
+	channel := c.channels[channelId]
+	u := channel[index]
+	c.channels[u.ID] = append(channel[:index], channel[:index+1]...)
+	c.connections--
 	c.mu.Unlock()
 	u.conn.Close()
 }
@@ -108,15 +113,16 @@ func user_pos(slice []*User, user *User) int {
 }
 func (c *Cache) removeUserByUser(user *User) {
 	c.mu.Lock()
-	index := user_pos(c.Users, user)
+	channel := c.channels[user.ID]
+	index := user_pos(channel, user)
 	if index == -1 {
 		c.mu.Unlock()
 		return
 	}
-	u := c.Users[index]
-	c.Users = append(c.Users[:index], c.Users[index+1:]...)
+	c.channels[user.ID] = append(channel[:index], channel[:index+1]...)
+	c.connections--
 	c.mu.Unlock()
-	u.conn.Close()
+	user.conn.Close()
 }
 
 var cfg Config
@@ -155,14 +161,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := cache.newUser(conn, r.FormValue("id"))
-	log.Printf("user %s joined\n", u.ID)
-	log.Printf("number of users %d", len(cache.Users))
+	log.Printf("user %s joined, total %d\n", u.ID, cache.connections)
 
 	conn.SetCloseHandler(func(code int, text string) error {
 		log.Printf("Connection ended by client")
 		cache.removeUserByUser(u)
-		log.Printf("user removed from %s", u.ID)
-		log.Printf("number of users %d", len(cache.Users))
+		log.Printf("user removed from %s, total %d\n", u.ID, cache.connections)
 		return nil
 	})
 
@@ -220,13 +224,27 @@ func (c *Cache) findAndDeliver(userID string, content string) {
 		}
 	}*/
 
-	for i := 0; i < len(c.Users); i++ {
+	/*for i := 0; i < len(c.Users); i++ {
 		u := c.Users[i]
 		if u.ID == userID {
 			if err := u.conn.WriteJSON(m); err != nil {
 				log.Printf("error on message delivery through ws. e: %s\n", err)
 				c.removeUserByIndex(i)
 				u.conn.Close()
+				i--
+			} else {
+				//log.Printf("user %s found at our store, message sent\n", userID)
+			}
+		}
+	}*/
+	channel := cache.channels[userID]
+	for i := 0; i < len(channel); i++ {
+		u := channel[i]
+		if u.ID == userID {
+			if err := u.conn.WriteJSON(m); err != nil {
+				log.Printf("error on message delivery through ws. e: %s\n", err)
+				c.removeUserByIndex(userID, i)
+				//u.conn.Close()
 				i--
 			} else {
 				//log.Printf("user %s found at our store, message sent\n", userID)
