@@ -94,10 +94,9 @@ func (c *Cache) removeUserByIndex(channelId string, index int) {
 		return
 	}
 	c.mu.Lock()
-	//c.Users = append(c.Users[:index], c.Users[:index+1]...)
 	channel := c.channels[channelId]
 	u := channel[index]
-	c.channels[u.ID] = append(channel[:index], channel[:index+1]...)
+	c.channels[u.ID] = append(channel[:index], channel[index+1:]...)
 	c.connections--
 	c.mu.Unlock()
 	u.conn.Close()
@@ -119,7 +118,7 @@ func (c *Cache) removeUserByUser(user *User) {
 		c.mu.Unlock()
 		return
 	}
-	c.channels[user.ID] = append(channel[:index], channel[:index+1]...)
+	c.channels[user.ID] = append(channel[:index], channel[index+1:]...)
 	c.connections--
 	c.mu.Unlock()
 	user.conn.Close()
@@ -212,31 +211,6 @@ func (c *Cache) findAndDeliver(userID string, content string) {
 	m := Message{
 		Content: content,
 	}
-	//log.Printf("message : %s \n", content)
-	/*for _, u := range c.Users {
-		if u.ID == userID {
-			if err := u.conn.WriteJSON(m); err != nil {
-				log.Printf("error on message delivery through ws. e: %s\n", err)
-			} else {
-				log.Printf("user %s found at our store, message sent\n", userID)
-			}
-			//return
-		}
-	}*/
-
-	/*for i := 0; i < len(c.Users); i++ {
-		u := c.Users[i]
-		if u.ID == userID {
-			if err := u.conn.WriteJSON(m); err != nil {
-				log.Printf("error on message delivery through ws. e: %s\n", err)
-				c.removeUserByIndex(i)
-				u.conn.Close()
-				i--
-			} else {
-				//log.Printf("user %s found at our store, message sent\n", userID)
-			}
-		}
-	}*/
 	channel := cache.channels[userID]
 	for i := 0; i < len(channel); i++ {
 		u := channel[i]
