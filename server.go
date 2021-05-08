@@ -89,17 +89,22 @@ func (c *Cache) newUser(conn *websocket.Conn, id string) *User {
 	return u
 }
 
-func (c *Cache) removeUserByIndex(channelId string, index int) {
-	if index == -1 {
-		return
-	}
+func (c *Cache) removeUserByIndex(channelId string, index int, user *User) int {
 	c.mu.Lock()
-	channel := c.channels[channelId]
+	channel := c.channels[user.ID]
+	if channel[index] != user {
+		index = user_pos(channel, user)
+	}
+	if index == -1 {
+		c.mu.Unlock()
+		return index
+	}
 	u := channel[index]
 	c.channels[u.ID] = append(channel[:index], channel[index+1:]...)
 	c.connections--
 	c.mu.Unlock()
 	u.conn.Close()
+	return index - 1
 }
 
 func user_pos(slice []*User, user *User) int {
@@ -217,9 +222,7 @@ func (c *Cache) findAndDeliver(userID string, content string) {
 		if u.ID == userID {
 			if err := u.conn.WriteJSON(m); err != nil {
 				log.Printf("error on message delivery through ws. e: %s\n", err)
-				c.removeUserByIndex(userID, i)
-				//u.conn.Close()
-				i--
+				i = c.removeUserByIndex(userID, i, u)
 			} else {
 				//log.Printf("user %s found at our store, message sent\n", userID)
 			}
