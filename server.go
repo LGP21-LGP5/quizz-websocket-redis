@@ -44,7 +44,6 @@ func readFile(cfg *Config) {
 
 var (
 	cache     *Cache
-	pubSub    *redis.PubSubConn
 	redisConn = func(cfg *Config) (redis.Conn, error) {
 		return redis.Dial("tcp", cfg.Redis.Address, redis.DialPassword(cfg.Redis.Pass))
 	}
@@ -57,8 +56,9 @@ func init() {
 }
 
 type User struct {
-	ID   string
-	conn *websocket.Conn
+	ID            string
+	websocketConn *websocket.Conn
+	redisConn     *redis.PubSubConn
 }
 
 type Cache struct {
@@ -72,13 +72,14 @@ type Message struct {
 	Content    string `json:"content"`
 }
 
-func (c *Cache) newUser(conn *websocket.Conn, id string) *User {
+func (c *Cache) newUser(conn *websocket.Conn, connection *redis.PubSubConn, id string) *User {
 	u := &User{
-		ID:   id,
-		conn: conn,
+		ID:            id,
+		websocketConn: conn,
+		redisConn:     connection,
 	}
 
-	if err := pubSub.Subscribe(u.ID); err != nil {
+	if err := u.redisConn.Subscribe(u.ID); err != nil {
 		panic(err)
 	}
 	c.mu.Lock()
@@ -103,7 +104,7 @@ func (c *Cache) removeUserByIndex(channelId string, index int, user *User) int {
 	c.channels[u.ID] = append(channel[:index], channel[index+1:]...)
 	c.connections--
 	c.mu.Unlock()
-	u.conn.Close()
+	u.websocketConn.Close()
 	return index - 1
 }
 
@@ -126,7 +127,7 @@ func (c *Cache) removeUserByUser(user *User) {
 	c.channels[user.ID] = append(channel[:index], channel[index+1:]...)
 	c.connections--
 	c.mu.Unlock()
-	user.conn.Close()
+	user.websocketConn.Close()
 }
 
 var cfg Config
@@ -134,21 +135,25 @@ var cfg Config
 func main() {
 	readFile(&cfg)
 
-	redisConn, err := redisConn(&cfg)
-	if err != nil {
-		panic(err)
-	}
-	defer redisConn.Close()
-
-	pubSub = &redis.PubSubConn{Conn: redisConn}
-	defer pubSub.Close()
-
-	go deliverMessages()
-
 	http.HandleFunc("/ws", wsHandler)
 
 	log.Printf("server started at %s\n", cfg.Server.Port)
 	log.Fatal(http.ListenAndServe(cfg.Server.Port, nil))
+}
+
+func getPubSub() (*redis.PubSubConn, error) {
+	var redisConnection redis.Conn
+	redisConnection, err := redisConn(&cfg)
+	if err != nil {
+		if redisConnection != nil {
+			redisConnection.Close()
+		}
+		return nil, err
+	}
+
+	var pubSub *redis.PubSubConn
+	pubSub = &redis.PubSubConn{Conn: redisConnection}
+	return pubSub, nil
 }
 
 var upgrader = websocket.Upgrader{
@@ -158,16 +163,24 @@ var upgrader = websocket.Upgrader{
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	websocketConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("upgrader error %s\n" + err.Error())
 		return
 	}
 
-	u := cache.newUser(conn, r.FormValue("id"))
+	var redisConnection *redis.PubSubConn
+	redisConnection, err = getPubSub()
+	if err != nil {
+		log.Printf("Failed to generate websocket connection: " + err.Error())
+		return
+	}
+
+	u := cache.newUser(websocketConn, redisConnection, r.FormValue("id"))
+	go deliverMessages(u)
 	log.Printf("user %s joined, total %d\n", u.ID, cache.connections)
 
-	conn.SetCloseHandler(func(code int, text string) error {
+	websocketConn.SetCloseHandler(func(code int, text string) error {
 		log.Printf("Connection ended by client")
 		cache.removeUserByUser(u)
 		log.Printf("user removed from %s, total %d\n", u.ID, cache.connections)
@@ -177,7 +190,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	for {
 		var m Message
 
-		if err := u.conn.ReadJSON(&m); err != nil {
+		if err := u.websocketConn.ReadJSON(&m); err != nil {
 			log.Printf("error on ws. message %s\n", err)
 			if c, k := err.(*websocket.CloseError); k {
 				if c.Code == 1000 || c.Code == 1001 || c.Code == 1005 {
@@ -190,7 +203,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if c, err := redisConn(&cfg); err != nil {
-			log.Printf("error on redis conn. %s\n", err)
+			log.Printf("error on redis websocketConn. %s\n", err)
 		} else {
 			c.Do("PUBLISH", m.DeliveryID, string(m.Content))
 			log.Printf("publised %s into %s\n", m.Content, m.DeliveryID)
@@ -198,9 +211,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func deliverMessages() {
+func deliverMessages(user *User) {
 	for {
-		switch v := pubSub.Receive().(type) {
+		switch v := user.redisConn.Receive().(type) {
 		case redis.Message:
 			cache.findAndDeliver(v.Channel, string(v.Data))
 		case redis.Subscription:
@@ -220,7 +233,7 @@ func (c *Cache) findAndDeliver(userID string, content string) {
 	for i := 0; i < len(channel); i++ {
 		u := channel[i]
 		if u.ID == userID {
-			if err := u.conn.WriteJSON(m); err != nil {
+			if err := u.websocketConn.WriteJSON(m); err != nil {
 				log.Printf("error on message delivery through ws. e: %s\n", err)
 				i = c.removeUserByIndex(userID, i, u)
 			} else {
