@@ -2,12 +2,10 @@ package main
 
 import (
 	"fmt"
+	"gopkg.in/yaml.v2"
 	"log"
 	"net/http"
 	"os"
-	"sync"
-
-	"gopkg.in/yaml.v2"
 
 	"github.com/garyburd/redigo/redis"
 	"github.com/gorilla/websocket"
@@ -43,17 +41,10 @@ func readFile(cfg *Config) {
 }
 
 var (
-	cache     *Cache
 	redisConn = func(cfg *Config) (redis.Conn, error) {
 		return redis.Dial("tcp", cfg.Redis.Address, redis.DialPassword(cfg.Redis.Pass))
 	}
 )
-
-func init() {
-	cache = &Cache{
-		channels: make(map[string][]*User),
-	}
-}
 
 type User struct {
 	ID            string
@@ -61,18 +52,12 @@ type User struct {
 	redisConn     *redis.PubSubConn
 }
 
-type Cache struct {
-	connections int
-	channels    map[string][]*User
-	mu          sync.Mutex
-}
-
 type Message struct {
 	DeliveryID string `json:"id"`
 	Content    string `json:"content"`
 }
 
-func (c *Cache) newUser(conn *websocket.Conn, connection *redis.PubSubConn, id string) *User {
+func newUser(conn *websocket.Conn, connection *redis.PubSubConn, id string) *User {
 	u := &User{
 		ID:            id,
 		websocketConn: conn,
@@ -82,51 +67,10 @@ func (c *Cache) newUser(conn *websocket.Conn, connection *redis.PubSubConn, id s
 	if err := u.redisConn.Subscribe(u.ID); err != nil {
 		panic(err)
 	}
-	c.mu.Lock()
-	//c.Users = append(c.Users, u)
-	c.channels[u.ID] = append(c.channels[u.ID], u)
-	c.connections++
-	defer c.mu.Unlock()
 	return u
 }
 
-func (c *Cache) removeUserByIndex(channelId string, index int, user *User) int {
-	c.mu.Lock()
-	channel := c.channels[user.ID]
-	if channel[index] != user {
-		index = user_pos(channel, user)
-	}
-	if index == -1 {
-		c.mu.Unlock()
-		return index
-	}
-	u := channel[index]
-	c.channels[u.ID] = append(channel[:index], channel[index+1:]...)
-	c.connections--
-	c.mu.Unlock()
-	u.websocketConn.Close()
-	return index - 1
-}
-
-func user_pos(slice []*User, user *User) int {
-	for p, u := range slice {
-		if u == user {
-			return p
-		}
-	}
-	return -1
-}
-func (c *Cache) removeUserByUser(user *User) {
-	c.mu.Lock()
-	channel := c.channels[user.ID]
-	index := user_pos(channel, user)
-	if index == -1 {
-		c.mu.Unlock()
-		return
-	}
-	c.channels[user.ID] = append(channel[:index], channel[index+1:]...)
-	c.connections--
-	c.mu.Unlock()
+func removeUserByUser(user *User) {
 	user.websocketConn.Close()
 }
 
@@ -176,14 +120,14 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := cache.newUser(websocketConn, redisConnection, r.FormValue("id"))
+	u := newUser(websocketConn, redisConnection, r.FormValue("id"))
 	go deliverMessages(u)
-	log.Printf("user %s joined, total %d\n", u.ID, cache.connections)
+	log.Printf("user %s joined\n", u.ID)
 
 	websocketConn.SetCloseHandler(func(code int, text string) error {
 		log.Printf("Connection ended by client")
-		cache.removeUserByUser(u)
-		log.Printf("user removed from %s, total %d\n", u.ID, cache.connections)
+		removeUserByUser(u)
+		log.Printf("user removed from %s", u.ID)
 		return nil
 	})
 
@@ -195,7 +139,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			if c, k := err.(*websocket.CloseError); k {
 				if c.Code == 1000 || c.Code == 1001 || c.Code == 1005 {
 					// Never entering since c.Code == 1005
-					cache.removeUserByUser(u)
+					removeUserByUser(u)
 					//log.Printf("2Removed user: %s\n", u.ID)
 					break
 				}
@@ -215,7 +159,7 @@ func deliverMessages(user *User) {
 	for {
 		switch v := user.redisConn.Receive().(type) {
 		case redis.Message:
-			cache.findAndDeliver(v.Channel, string(v.Data))
+			deliverIfNeeded(v.Channel, string(v.Data), user)
 		case redis.Subscription:
 			log.Printf("subscription message: %s: %s %d\n", v.Channel, v.Kind, v.Count)
 		case error:
@@ -225,22 +169,17 @@ func deliverMessages(user *User) {
 	}
 }
 
-func (c *Cache) findAndDeliver(userID string, content string) {
+func deliverIfNeeded(userID string, content string, user *User) {
 	m := Message{
 		Content: content,
 	}
-	channel := cache.channels[userID]
-	for i := 0; i < len(channel); i++ {
-		u := channel[i]
-		if u.ID == userID {
-			if err := u.websocketConn.WriteJSON(m); err != nil {
-				log.Printf("error on message delivery through ws. e: %s\n", err)
-				i = c.removeUserByIndex(userID, i, u)
-			} else {
-				//log.Printf("user %s found at our store, message sent\n", userID)
-			}
+
+	if userID == user.ID {
+		if err := user.websocketConn.WriteJSON(m); err != nil {
+			log.Printf("error on message delivery through ws. e: %s\n", err)
+			removeUserByUser(user)
+		} else {
+			//log.Printf("user %s found at our store, message sent\n", userID)
 		}
 	}
-
-	//log.Printf("user %s not found at our store\n", userID)
 }
